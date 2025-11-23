@@ -47,11 +47,11 @@ const statusMapping = {
 
 // Map Jira priorities to OpenProject priorities
 const priorityMapping = {
-  Highest: "Immediate",
+  Highest: "Critical",
   High: "High",
   Medium: "Normal",
   Low: "Low",
-  Lowest: "Low",
+  Lowest: "Trivial",
 };
 
 async function getOpenProjectWorkPackages(projectId) {
