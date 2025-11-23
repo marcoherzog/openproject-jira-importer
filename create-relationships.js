@@ -183,10 +183,9 @@ async function createRelationship(fromId, toId, type) {
       description: "Created by Jira migration",
       lag: 0,
       _links: {
-        to: {
-          href: `/api/v3/work_packages/${toId}`,
-        },
-      },
+        from: { href: `/api/v3/work_packages/${fromId}` },
+        to:   { href: `/api/v3/work_packages/${toId}` }
+      }
     };
 
     console.log(
@@ -202,6 +201,25 @@ async function createRelationship(fromId, toId, type) {
     console.log("Creation response:", JSON.stringify(response.data, null, 2));
     console.log(`Created ${type} relationship: ${fromId} -> ${toId}`);
   } catch (error) {
+    const err = error.response?.data;
+    const messages =
+        err?._embedded?.errors?.map((e) => e.message.toLowerCase()) || [];
+
+    const alreadyExists =
+        messages.some((m) =>
+            m.includes("already been taken")
+        ) ||
+        messages.some((m) =>
+            m.includes("would create a circular")
+        );
+
+    if (alreadyExists) {
+      console.log(
+          `Skipping: Relationship ${fromId} ${type} ${toId} already exists or is logically identical.`
+      );
+      return;
+    }
+
     console.error(
       `Error creating relationship: ${fromId} -> ${toId} ${type} ${error.message}`
     );
