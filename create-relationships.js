@@ -14,6 +14,32 @@ const openProjectConfig = {
 
 const openProjectApi = axios.create(openProjectConfig);
 
+async function findWorkPackageByIssueKey(issueKey) {
+  try {
+    const response = await openProjectApi.get("/work_packages", {
+      params: {
+        filters: JSON.stringify([
+          {
+            customField1: {
+              operator: "=",
+              values: [issueKey]
+            }
+          }
+        ])
+      }
+    });
+
+    if (response.data.total > 0) {
+      const wp = response.data._embedded.elements[0];
+      return wp.id;
+    }
+    return null;
+  } catch (err) {
+    console.error(`Lookup error for ${issueKey}: ${err.message}`);
+    return null;
+  }
+}
+
 // Store issue key to work package ID mapping
 const issueToWorkPackageMap = new Map();
 
@@ -339,17 +365,22 @@ async function handleRelationships(issue) {
         );
       }
     } else {
-      console.log(
-        `Skipping relationship: Target issue ${relatedIssueKey} not found in current migration batch`
-      );
-      // Store missing relationship to retry
-      missingRelationships.add(
-        JSON.stringify({
-          fromKey: issue.key,
-          toKey: relatedIssueKey,
-          type: relationType,
-        })
-      );
+      const lookedUp = await findWorkPackageByIssueKey(relatedIssueKey);
+
+      if (lookedUp) {
+        // store mapping dynamically
+        issueToWorkPackageMap.set(relatedIssueKey, lookedUp);
+
+        await createRelationship(fromWorkPackageId, lookedUp, relationType);
+      } else {
+        missingRelationships.add(
+          JSON.stringify({
+            fromKey: issue.key,
+            toKey: relatedIssueKey,
+            type: relationType,
+          })
+        );
+      }
     }
   }
 }
@@ -366,24 +397,30 @@ async function retryMissingRelationships() {
   missingRelationships.clear();
 
   for (const rel of retryRelationships) {
-    const fromWorkPackageId = issueToWorkPackageMap.get(rel.fromKey);
-    const toWorkPackageId = issueToWorkPackageMap.get(rel.toKey);
+    let fromWorkPackageId = issueToWorkPackageMap.get(rel.fromKey);
+    let toWorkPackageId = issueToWorkPackageMap.get(rel.toKey);
+
+    if (!fromWorkPackageId) {
+      const lookedUpFrom = await findWorkPackageByIssueKey(rel.fromKey);
+      if (lookedUpFrom) {
+        issueToWorkPackageMap.set(rel.fromKey, lookedUpFrom);
+        fromWorkPackageId = lookedUpFrom;
+      }
+    }
+
+    if (!toWorkPackageId) {
+      const lookedUpTo = await findWorkPackageByIssueKey(rel.toKey);
+      if (lookedUpTo) {
+        issueToWorkPackageMap.set(rel.toKey, lookedUpTo);
+        toWorkPackageId = lookedUpTo;
+      }
+    }
 
     if (fromWorkPackageId && toWorkPackageId) {
-      try {
-        await createRelationship(fromWorkPackageId, toWorkPackageId, rel.type);
-        console.log(
-          `Created relationship: ${rel.fromKey} ${rel.type} ${rel.toKey}`
-        );
-      } catch (error) {
-        console.error(
-          `Failed to create relationship: ${rel.fromKey} ${rel.type} ${rel.toKey}`
-        );
-      }
+      await createRelationship(fromWorkPackageId, toWorkPackageId, rel.type);
+      console.log(`Created relationship: ${rel.fromKey} ${rel.type} ${rel.toKey}`);
     } else {
-      console.log(
-        `Still missing work package for relationship: ${rel.fromKey} ${rel.type} ${rel.toKey}`
-      );
+      missingRelationships.add(JSON.stringify(rel));
     }
   }
 }
