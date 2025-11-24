@@ -128,6 +128,7 @@ async function migrateIssues(
   let processed = 0;
   let skipped = 0;
   let errors = 0;
+  let unknownStatusCount = 0;
   const issueToWorkPackageMap = new Map();
 
   for (const issue of jiraIssues) {
@@ -164,6 +165,11 @@ async function migrateIssues(
         responsibleId = await getOpenProjectUserId(issue.fields.creator);
       }
 
+      const opStatusId = getWorkPackageStatusId(issue.fields.status.name);
+      if (opStatusId === getWorkPackageStatusId("unknown")) {
+        unknownStatusCount++;
+      }
+
       // Create work package payload
       const payload = {
         _type: "WorkPackage",
@@ -180,9 +186,7 @@ async function migrateIssues(
             )}`,
           },
           status: {
-            href: `/api/v3/statuses/${getWorkPackageStatusId(
-              issue.fields.status.name
-            )}`,
+            href: `/api/v3/statuses/${opStatusId}`,
           },
           priority: {
             href: `/api/v3/priorities/${getWorkPackagePriorityId(
@@ -308,6 +312,7 @@ async function migrateIssues(
   console.log(`Completed: ${processed}`);
   console.log(`Skipped: ${skipped}`);
   console.log(`Errors: ${errors}`);
+  console.log(`UNKNOWN statuses assigned: ${unknownStatusCount}`);
 
   return issueToWorkPackageMap;
 }

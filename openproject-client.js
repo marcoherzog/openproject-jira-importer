@@ -38,7 +38,7 @@ const typeMapping = {
 
 // Map Jira statuses to OpenProject statuses
 const statusMapping = {
-  "To Do": "To Do",
+  "To Do": "New",
   "In Progress": "In Progress",
   "In Review": "In Review",
   "Done": "Done",
@@ -388,7 +388,7 @@ function getWorkPackageTypeId(jiraIssueType) {
 
 function getWorkPackageStatusId(jiraStatus) {
   console.log(`Mapping Jira status: ${jiraStatus}`);
-  const mappedStatus = statusMapping[jiraStatus] || "New"; // Default to New if no mapping found
+  const mappedStatus = statusMapping[jiraStatus] || "unknown"; // Default to unknown if no mapping found
   const statusObj = workPackageStatuses.find(
     (s) => s.name.toLowerCase() === mappedStatus.toLowerCase()
   );
