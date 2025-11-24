@@ -38,11 +38,13 @@ const typeMapping = {
 
 // Map Jira statuses to OpenProject statuses
 const statusMapping = {
-  "To Do": "New",
-  "In Progress": "In progress",
-  Done: "Closed",
-  Closed: "Closed",
-  Resolved: "Closed",
+  "To Do": "To Do",
+  "In Progress": "In Progress",
+  "In Review": "In Review",
+  "Done": "Done",
+  "Closed": "Closed",
+  "Resolved": "Done",
+  "Live": "Closed"
 };
 
 // Map Jira priorities to OpenProject priorities
