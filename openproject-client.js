@@ -311,7 +311,7 @@ async function addWatcher(workPackageId, userId) {
 
 async function listProjects() {
   try {
-    const response = await openProjectApi.get("/projects");
+    const response = await openProjectApi.get("/projects", {params: {pageSize: 500}});
     console.log("\nAvailable OpenProject Projects:");
     response.data._embedded.elements.forEach((project) => {
       console.log(`- ID: ${project.id}, Name: ${project.name}`);
