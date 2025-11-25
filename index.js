@@ -348,12 +348,20 @@ async function migrateIssues(
 }
 
 function convertAtlassianDocumentToHtml(doc) {
+  console.log("--- Input to convertAtlassianDocumentToHtml ---");
+  console.log(JSON.stringify(doc, null, 2));
+
   if (!doc) {
+    console.log("--- Output: Empty string (null document) ---");
     return "";
   }
   if (typeof doc === "string") {
-    return `<p>${doc}</p>`;
+    const html = `<p>${doc}</p>`;
+    console.log(`--- Output: HTML: "${html}" ---`);
+    return html;
   }
+
+  let htmlOutput = "";
 
   function processNode(node) {
     if (!node || !node.type) return "";
@@ -407,12 +415,24 @@ function convertAtlassianDocumentToHtml(doc) {
         return `<th>${content}</th>`;
       case "tableCell":
         return `<td>${content}</td>`;
+      case "mediaSingle":
+        return `<p>${content}</p>`;
+      case "media":
+        if (node.attrs.type === "file" && node.attrs.alt) {
+          return `!${node.attrs.alt}!`;
+        }
+        return "";
       default:
         return content;
     }
   }
 
-  return processNode(doc);
+  htmlOutput = processNode(doc);
+
+  console.log("--- Output from convertAtlassianDocumentToHtml ---");
+  console.log(htmlOutput);
+  console.log("-------------------------------------------------");
+  return htmlOutput;
 }
 
 module.exports = {
