@@ -228,11 +228,15 @@ async function updateWorkPackage(workPackageId, payload) {
 
 async function addComment(workPackageId, comment) {
   try {
-    await openProjectApi.post(`/work_packages/${workPackageId}/activities`, {
-      comment: {
-        raw: Buffer.from(comment).toString("utf8"),
-      },
-    });
+    await openProjectApi.post(
+      `/work_packages/${workPackageId}/activities`,
+      {
+        comment: {
+          format: "html",
+          raw: Buffer.from(comment).toString("utf8"),
+        },
+      }
+    );
   } catch (error) {
     console.error(
       `Error adding comment to work package ${workPackageId}:`,
@@ -450,17 +454,24 @@ async function getExistingComments(workPackageId) {
 
 async function getOpenProjectUsers() {
   try {
-    const response = await openProjectApi.get("/users");
+    const response = await openProjectApi.get("/users", { params: { pageSize: 500 } });
     openProjectUsers = response.data._embedded.elements;
     console.log("\nAvailable OpenProject users:");
     openProjectUsers.forEach((user) => {
-      console.log(`- ${user.name} (ID: ${user.id}, Email: ${user.email})`);
+      console.log(
+        `- ${user.name} (ID: ${user.id}, Login: ${user.login}, Email: ${user.email})`
+      );
     });
     return openProjectUsers;
   } catch (error) {
     console.error("Error fetching OpenProject users:", error.message);
     throw error;
   }
+}
+
+function getOpenProjectUserById(id) {
+  if (!openProjectUsers) return null;
+  return openProjectUsers.find((u) => u.id === id);
 }
 
 async function findExistingWorkPackage(jiraKey, projectId) {
@@ -481,7 +492,8 @@ async function findExistingWorkPackage(jiraKey, projectId) {
 
     const workPackages = response.data._embedded.elements;
     return workPackages.length > 0 ? workPackages[0] : null;
-  } catch (error) {
+  } catch (error)
+ {
     console.error(`Error finding existing work package: ${error.message}`);
     if (error.response?.data) {
       console.error(
@@ -521,6 +533,7 @@ module.exports = {
   getExistingAttachments,
   getExistingComments,
   getOpenProjectUsers,
+  getOpenProjectUserById,
   findExistingWorkPackage,
   getWorkPackageTypeName,
   getWorkPackageStatusName,

@@ -23,6 +23,7 @@ const {
   getExistingAttachments,
   getExistingComments,
   getOpenProjectUsers,
+  getOpenProjectUserById,
   findExistingWorkPackage,
   JIRA_ID_CUSTOM_FIELD,
   getWorkPackagePriorityId,
@@ -240,6 +241,7 @@ async function migrateIssues(
       issueToWorkPackageMap.set(issue.key, workPackage.id);
 
       // Process attachments
+      const attachmentIdMap = new Map();
       if (issue.fields.attachment && issue.fields.attachment.length > 0) {
         const existingAttachments = isProd
           ? await getExistingAttachments(workPackage.id)
@@ -251,6 +253,10 @@ async function migrateIssues(
         for (const attachment of issue.fields.attachment) {
           if (existingAttachmentNames.includes(attachment.filename)) {
             console.log(`Skipping existing attachment: ${attachment.filename}`);
+            const existing = existingAttachments.find(a => a.fileName === attachment.filename);
+            if(existing) {
+              attachmentIdMap.set(attachment.filename, existing.id);
+            }
             continue;
           }
 
@@ -258,15 +264,44 @@ async function migrateIssues(
           if (isProd) {
             const tempFilePath = path.join(tempDir, attachment.filename);
             await downloadAttachment(attachment.content, tempFilePath);
-            await uploadAttachment(
+            const newAttachment = await uploadAttachment(
               workPackage.id,
               tempFilePath,
               attachment.filename
             );
+            attachmentIdMap.set(attachment.filename, newAttachment.id);
             fs.unlinkSync(tempFilePath);
           } else {
             console.log(
               `[DRY RUN] Would upload attachment: ${attachment.filename}`
+            );
+            attachmentIdMap.set(attachment.filename, "DRY_RUN_ATTACHMENT_ID");
+          }
+        }
+      }
+
+      // Finalize description with inline images
+      let finalDescription = payload.description.raw;
+      if (attachmentIdMap.size > 0) {
+        for (const [filename, attachmentId] of attachmentIdMap.entries()) {
+          const placeholder = `{{jira-attachment-placeholder:${filename}}}`;
+          const imageTag = `<img class="op-uc-image op-uc-image_inline" src="/api/v3/attachments/${attachmentId}/content">`;
+          finalDescription = finalDescription.replace(placeholder, imageTag);
+        }
+
+        if (finalDescription !== payload.description.raw) {
+          console.log("Updating work package with inline images.");
+          if (isProd) {
+            await updateWorkPackage(workPackage.id, {
+              description: {
+                format: "html",
+                raw: finalDescription,
+              },
+            });
+          } else {
+            console.log(
+              "[DRY RUN] Would perform second update for description:",
+              finalDescription
             );
           }
         }
@@ -277,25 +312,44 @@ async function migrateIssues(
         const existingComments = isProd
           ? await getExistingComments(workPackage.id)
           : [];
-        const existingCommentBodies = existingComments.map((c) => c.body.raw);
+        const commentMap = new Map();
+        const jiraCommentIdRegex = /<!-- jira-comment-id: (\d+) -->/;
 
-        for (const comment of issue.fields.comment.comments) {
-          const commentHtml = convertAtlassianDocumentToHtml(comment.body);
+        for (const opComment of existingComments) {
+          const match = opComment.comment.raw.match(jiraCommentIdRegex);
+          if (match) {
+            commentMap.set(match[1], opComment);
+          }
+        }
+
+        for (const jiraComment of issue.fields.comment.comments) {
+          if (commentMap.has(jiraComment.id)) {
+            console.log(`Skipping already migrated comment for Jira ID ${jiraComment.id}.`);
+            continue;
+          }
+          
+          let commentHtml = convertAtlassianDocumentToHtml(jiraComment.body);
           if (commentHtml) {
-            const author = comment.author.displayName;
-            const date = new Date(comment.created).toLocaleString();
-            const fullCommentHtml = `<p><em>${author} wrote on ${date}:</em></p>${commentHtml}`;
-
-            if (existingCommentBodies.includes(fullCommentHtml)) {
-              console.log("Skipping existing comment");
-              continue;
+             if (attachmentIdMap.size > 0) {
+                for (const [filename, attachmentId] of attachmentIdMap.entries()) {
+                    const placeholder = `{{jira-attachment-placeholder:${filename}}}`;
+                    const imageTag = `<img class="op-uc-image op-uc-image_inline" src="/api/v3/attachments/${attachmentId}/content">`;
+                    commentHtml = commentHtml.replace(placeholder, imageTag);
+                }
             }
 
-            console.log("Adding comment");
+            const author = jiraComment.author.displayName;
+            const date = new Date(jiraComment.created).toLocaleString();
+            const fullCommentHtml = `<p><em>${author} wrote on ${date}:</em></p>${commentHtml}<!-- jira-comment-id: ${jiraComment.id} -->`;
+
+            console.log(`Adding new comment for Jira ID ${jiraComment.id}`);
             if (isProd) {
               await addComment(workPackage.id, fullCommentHtml);
             } else {
-              console.log("[DRY RUN] Would add comment:", fullCommentHtml);
+              console.log(
+                `[DRY RUN] Would add new comment:`,
+                fullCommentHtml
+              );
             }
           }
         }
@@ -348,20 +402,12 @@ async function migrateIssues(
 }
 
 function convertAtlassianDocumentToHtml(doc) {
-  console.log("--- Input to convertAtlassianDocumentToHtml ---");
-  console.log(JSON.stringify(doc, null, 2));
-
   if (!doc) {
-    console.log("--- Output: Empty string (null document) ---");
     return "";
   }
   if (typeof doc === "string") {
-    const html = `<p>${doc}</p>`;
-    console.log(`--- Output: HTML: "${html}" ---`);
-    return html;
+    return `<p>${doc}</p>`;
   }
-
-  let htmlOutput = "";
 
   function processNode(node) {
     if (!node || !node.type) return "";
@@ -419,7 +465,7 @@ function convertAtlassianDocumentToHtml(doc) {
         return `<p>${content}</p>`;
       case "media":
         if (node.attrs.type === "file" && node.attrs.alt) {
-          return `!${node.attrs.alt}!`;
+          return `{{jira-attachment-placeholder:${node.attrs.alt}}}`;
         }
         return "";
       default:
@@ -427,12 +473,7 @@ function convertAtlassianDocumentToHtml(doc) {
     }
   }
 
-  htmlOutput = processNode(doc);
-
-  console.log("--- Output from convertAtlassianDocumentToHtml ---");
-  console.log(htmlOutput);
-  console.log("-------------------------------------------------");
-  return htmlOutput;
+  return processNode(doc);
 }
 
 module.exports = {
