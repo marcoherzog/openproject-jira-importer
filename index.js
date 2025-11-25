@@ -175,9 +175,8 @@ async function migrateIssues(
         _type: "WorkPackage",
         subject: issue.fields.summary,
         description: {
-          raw: Buffer.from(
-            convertAtlassianDocumentToText(issue.fields.description)
-          ).toString("utf8"),
+          format: "html",
+          raw: convertAtlassianDocumentToHtml(issue.fields.description),
         },
         _links: {
           type: {
@@ -215,21 +214,36 @@ async function migrateIssues(
       }
 
       let workPackage;
-      if (existingWorkPackage) {
-        console.log(`Updating existing work package ${existingWorkPackage.id}`);
-        workPackage = await updateWorkPackage(existingWorkPackage.id, payload);
+      if (isProd) {
+        if (existingWorkPackage) {
+          console.log(
+            `Updating existing work package ${existingWorkPackage.id}`
+          );
+          workPackage = await updateWorkPackage(
+            existingWorkPackage.id,
+            payload
+          );
+        } else {
+          console.log("Creating new work package");
+          workPackage = await createWorkPackage(openProjectId, payload);
+        }
       } else {
-        console.log("Creating new work package");
-        workPackage = await createWorkPackage(openProjectId, payload);
+        console.log(
+          "[DRY RUN] Would create or update work package with payload:",
+          JSON.stringify(payload, null, 2)
+        );
+        workPackage = {
+          id: existingWorkPackage ? existingWorkPackage.id : "DRY_RUN_WP_ID",
+        };
       }
 
       issueToWorkPackageMap.set(issue.key, workPackage.id);
 
       // Process attachments
       if (issue.fields.attachment && issue.fields.attachment.length > 0) {
-        const existingAttachments = await getExistingAttachments(
-          workPackage.id
-        );
+        const existingAttachments = isProd
+          ? await getExistingAttachments(workPackage.id)
+          : [];
         const existingAttachmentNames = existingAttachments.map(
           (a) => a.fileName
         );
@@ -241,38 +255,48 @@ async function migrateIssues(
           }
 
           console.log(`Processing attachment: ${attachment.filename}`);
-          const tempFilePath = path.join(tempDir, attachment.filename);
-          await downloadAttachment(attachment.content, tempFilePath);
-          await uploadAttachment(
-            workPackage.id,
-            tempFilePath,
-            attachment.filename
-          );
-          fs.unlinkSync(tempFilePath);
+          if (isProd) {
+            const tempFilePath = path.join(tempDir, attachment.filename);
+            await downloadAttachment(attachment.content, tempFilePath);
+            await uploadAttachment(
+              workPackage.id,
+              tempFilePath,
+              attachment.filename
+            );
+            fs.unlinkSync(tempFilePath);
+          } else {
+            console.log(
+              `[DRY RUN] Would upload attachment: ${attachment.filename}`
+            );
+          }
         }
       }
 
       // Process comments
       if (issue.fields.comment && issue.fields.comment.comments.length > 0) {
-        const existingComments = await getExistingComments(workPackage.id);
-        const existingCommentTexts = existingComments.map((c) => c.comment.raw);
+        const existingComments = isProd
+          ? await getExistingComments(workPackage.id)
+          : [];
+        const existingCommentBodies = existingComments.map((c) => c.body.raw);
 
         for (const comment of issue.fields.comment.comments) {
-          const commentText = convertAtlassianDocumentToText(comment.body);
-          if (commentText) {
-            const formattedComment = `${
-              comment.author.displayName
-            } wrote on ${new Date(
-              comment.created
-            ).toLocaleString()}:\n${commentText}`;
+          const commentHtml = convertAtlassianDocumentToHtml(comment.body);
+          if (commentHtml) {
+            const author = comment.author.displayName;
+            const date = new Date(comment.created).toLocaleString();
+            const fullCommentHtml = `<p><em>${author} wrote on ${date}:</em></p>${commentHtml}`;
 
-            if (existingCommentTexts.includes(formattedComment)) {
+            if (existingCommentBodies.includes(fullCommentHtml)) {
               console.log("Skipping existing comment");
               continue;
             }
 
             console.log("Adding comment");
-            await addComment(workPackage.id, formattedComment);
+            if (isProd) {
+              await addComment(workPackage.id, fullCommentHtml);
+            } else {
+              console.log("[DRY RUN] Would add comment:", fullCommentHtml);
+            }
           }
         }
       }
@@ -284,7 +308,13 @@ async function migrateIssues(
         for (const watcher of watchers.watchers) {
           const watcherId = await getOpenProjectUserId(watcher);
           if (watcherId) {
-            await addWatcher(workPackage.id, watcherId);
+            if (isProd) {
+              await addWatcher(workPackage.id, watcherId);
+            } else {
+              console.log(
+                `[DRY RUN] Would add watcher ${watcherId} to work package ${workPackage.id}`
+              );
+            }
           }
         }
       }
@@ -303,7 +333,7 @@ async function migrateIssues(
   }
 
   // Clean up temp directory
-  if (fs.existsSync(tempDir)) {
+  if (isProd && fs.existsSync(tempDir)) {
     fs.rmSync(tempDir, { recursive: true });
   }
 
@@ -317,22 +347,72 @@ async function migrateIssues(
   return issueToWorkPackageMap;
 }
 
-function convertAtlassianDocumentToText(document) {
-  if (!document) return "";
-  if (typeof document === "string") return document;
-
-  try {
-    if (document.content) {
-      return document.content
-        .map((block) => block.content?.map((c) => c.text).join("") || "")
-        .join("\n")
-        .trim();
-    }
-    return "";
-  } catch (error) {
-    console.error("Error converting Atlassian document:", error);
+function convertAtlassianDocumentToHtml(doc) {
+  if (!doc) {
     return "";
   }
+  if (typeof doc === "string") {
+    return `<p>${doc}</p>`;
+  }
+
+  function processNode(node) {
+    if (!node || !node.type) return "";
+
+    let content = "";
+    if (node.content) {
+      content = node.content.map(processNode).join("");
+    }
+
+    switch (node.type) {
+      case "doc":
+        return content;
+      case "paragraph":
+        return `<p>${content || "&nbsp;"}</p>`;
+      case "text":
+        let text = node.text.replace(/</g, "&lt;").replace(/>/g, "&gt;");
+        if (node.marks) {
+          node.marks.forEach((mark) => {
+            if (mark.type === "strong") {
+              text = `<strong>${text}</strong>`;
+            } else if (mark.type === "em") {
+              text = `<em>${text}</em>`;
+            } else if (mark.type === "code") {
+              text = `<code>${text}</code>`;
+            } else if (mark.type === "link") {
+              text = `<a href="${mark.attrs.href}">${text}</a>`;
+            }
+          });
+        }
+        return text;
+      case "bulletList":
+        return `<ul>${content}</ul>`;
+      case "orderedList":
+        return `<ol>${content}</ol>`;
+      case "listItem":
+        return `<li>${content}</li>`;
+      case "heading":
+        const level = node.attrs.level || 1;
+        return `<h${level}>${content}</h${level}>`;
+      case "codeBlock":
+        return `<pre><code>${content}</code></pre>`;
+      case "blockquote":
+        return `<blockquote>${content}</blockquote>`;
+      case "hardBreak":
+        return "<br />";
+      case "table":
+        return `<table><tbody>${content}</tbody></table>`;
+      case "tableRow":
+        return `<tr>${content}</tr>`;
+      case "tableHeader":
+        return `<th>${content}</th>`;
+      case "tableCell":
+        return `<td>${content}</td>`;
+      default:
+        return content;
+    }
+  }
+
+  return processNode(doc);
 }
 
 module.exports = {
