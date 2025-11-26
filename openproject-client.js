@@ -353,9 +353,23 @@ async function addCommentAsUser(workPackageId, commentHtml, opUser) {
 
   console.log("DEBUG addCommentAsUser(): Using auth user:", opUser.login);
 
-  return client.post(`/api/v3/work_packages/${workPackageId}/activities`, {
-    comment: { format: "html", raw: commentHtml }
-  });
+  const response = await client.post(
+    `/api/v3/work_packages/${workPackageId}/activities`,
+    { comment: { format: "html", raw: commentHtml } }
+  );
+
+  const activityHref = response.data?._links?.self?.href || "";
+  const journalId = parseInt(activityHref.split("/").pop());
+
+  if (!isNaN(journalId)) {
+    return {
+      journal_id: journalId,
+      jira_comment_id: null,
+      created_at: null
+    };
+  }
+
+  return response.data;
 }
 
 async function uploadAttachment(workPackageId, filePath, fileName) {

@@ -43,6 +43,16 @@ if (!fs.existsSync(tempDir)) {
 }
 
 let userMapping = null;
+let commentTimestampQueue = [];
+const queuePath = path.join(__dirname, "comment-timestamps.json");
+
+if (fs.existsSync(queuePath)) {
+  try {
+    commentTimestampQueue = JSON.parse(fs.readFileSync(queuePath, "utf8"));
+  } catch (e) {
+    console.error("Failed to load existing comment-timestamps.json:", e.message);
+  }
+}
 
 async function getOpenProjectUserId(jiraUser) {
   if (!jiraUser) {
@@ -413,10 +423,33 @@ async function migrateIssues(
             const fullCommentHtml = `${commentHtml}<!-- jira-comment-id: ${jiraComment.id} -->`;
 
             console.log(`Adding new comment for Jira ID ${jiraComment.id}`);
+
             if (isProd) {
               if (opUser) {
                 console.log(`DEBUG: Adding comment as impersonated user: ${opUser.login}`);
-                await addCommentAsUser(workPackage.id, fullCommentHtml, opUser);
+
+                const returned = await addCommentAsUser(workPackage.id, fullCommentHtml, opUser);
+
+                if (returned && returned.journal_id) {
+
+                  let existing = commentTimestampQueue.find(
+                      e => e.journal_id === returned.journal_id ||
+                          e.jira_comment_id === jiraComment.id
+                  );
+
+                  if (existing) {
+                    existing.journal_id = returned.journal_id;
+                    existing.jira_comment_id = jiraComment.id;
+                    existing.created_at = jiraComment.created;
+                  } else {
+                    commentTimestampQueue.push({
+                      journal_id: returned.journal_id,
+                      jira_comment_id: jiraComment.id,
+                      created_at: jiraComment.created
+                    });
+                  }
+                }
+
               } else {
                 console.log("DEBUG: No impersonation possible → using default addComment()");
                 await addComment(workPackage.id, fullCommentHtml);
@@ -465,6 +498,17 @@ async function migrateIssues(
   // Clean up temp directory
   if (isProd && fs.existsSync(tempDir)) {
     fs.rmSync(tempDir, { recursive: true });
+  }
+
+  // Save queued timestamps for later processing
+  try {
+    fs.writeFileSync(
+      path.join(__dirname, "comment-timestamps.json"),
+      JSON.stringify(commentTimestampQueue, null, 2)
+    );
+    console.log(`Saved ${commentTimestampQueue.length} comment timestamps.`);
+  } catch (err) {
+    console.error("Failed to write comment-timestamps.json:", err.message);
   }
 
   console.log("\nMigration summary:");
