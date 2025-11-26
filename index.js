@@ -9,6 +9,7 @@ const {
   listProjects,
   getIssueWatchers,
 } = require("./jira-client");
+const commentUserMapping = require("./op-user-api-keys");
 const { generateMapping } = require("./generate-user-mapping");
 const {
   getOpenProjectWorkPackages,
@@ -323,11 +324,31 @@ async function migrateIssues(
         }
 
         for (const jiraComment of issue.fields.comment.comments) {
+
+          console.log(`jiraComment.author.accountId: ${jiraComment.author.accountId}.`);
+
+          const openProjectUserId = userMapping[jiraComment.author.accountId];
+
+          console.log(`openProjectUserId: ${openProjectUserId}.`);
+
+          const mappedUser = commentUserMapping[openProjectUserId];
+
+          console.log(`mappedUser: ${mappedUser}.`);
+
+          console.log("DEBUG Processing Jira comment:", {
+            jiraCommentId: jiraComment.id,
+            jiraAuthor: jiraComment.author?.displayName,
+            mappedUser: mappedUser
+                ? { login: mappedUser.login, hasApiKey: !!mappedUser.apiKey }
+                : null
+          });
+
+          const opUser = commentUserMapping[openProjectUserId];
           if (commentMap.has(jiraComment.id)) {
             console.log(`Skipping already migrated comment for Jira ID ${jiraComment.id}.`);
             continue;
           }
-          
+
           let commentHtml = convertAtlassianDocumentToHtml(jiraComment.body);
           if (commentHtml) {
              if (attachmentIdMap.size > 0) {
@@ -344,7 +365,13 @@ async function migrateIssues(
 
             console.log(`Adding new comment for Jira ID ${jiraComment.id}`);
             if (isProd) {
-              await addComment(workPackage.id, fullCommentHtml);
+              if (opUser) {
+                console.log(`DEBUG: Adding comment as impersonated user: ${opUser.login}`);
+                await addCommentAsUser(workPackage.id, fullCommentHtml, opUser);
+              } else {
+                console.log("DEBUG: No impersonation possible → using default addComment()");
+                await addComment(workPackage.id, fullCommentHtml);
+              }
             } else {
               console.log(
                 `[DRY RUN] Would add new comment:`,
@@ -474,6 +501,31 @@ function convertAtlassianDocumentToHtml(doc) {
   }
 
   return processNode(doc);
+}
+
+async function addCommentAsUser(workPackageId, commentHtml, opUser) {
+
+  console.log("DEBUG addCommentAsUser():", {
+    workPackageId,
+    login: opUser?.login,
+    apiKeyExists: !!opUser?.apiKey
+  });
+
+  const axios = require("axios");
+  const authString = Buffer.from(`apikey:${opUser.apiKey}`).toString("base64");
+  const client = axios.create({
+    baseURL: process.env.OPENPROJECT_HOST,
+    headers: {
+      Authorization: `Basic ${authString}`,
+      "Content-Type": "application/json"
+    }
+  });
+
+  console.log("DEBUG addCommentAsUser(): Using auth user:", opUser.login);
+
+  return client.post(`/api/v3/work_packages/${workPackageId}/activities`, {
+    comment: { format: "html", raw: commentHtml }
+  });
 }
 
 module.exports = {
