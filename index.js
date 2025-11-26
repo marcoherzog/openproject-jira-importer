@@ -14,9 +14,13 @@ const { generateMapping } = require("./generate-user-mapping");
 const {
   getOpenProjectWorkPackages,
   createWorkPackage,
+  createWorkPackageAsUser,
   updateWorkPackage,
+  updateWorkPackageAsUser,
   addComment,
+  addCommentAsUser,
   uploadAttachment,
+  uploadAttachmentAsUser,
   getWorkPackageTypes,
   getWorkPackageStatuses,
   getWorkPackageTypeId,
@@ -66,7 +70,8 @@ async function migrateIssues(
   isProd,
   specificIssues,
   skipUpdates,
-  mapResponsible
+  mapResponsible,
+  options = {}
 ) {
   console.log(
     `Starting migration for project ${jiraProjectKey} to OpenProject project ${openProjectId}`
@@ -81,16 +86,22 @@ async function migrateIssues(
   console.log("\nChecking user mapping...");
   try {
     userMapping = require("./user-mapping");
-    const shouldUpdate = await inquirer.prompt([
-      {
-        type: "confirm",
-        name: "update",
-        message: "Existing user mapping found. Would you like to update it?",
-        default: false,
-      },
-    ]);
-    if (shouldUpdate.update) {
-      userMapping = await generateMapping();
+    if (options.forceUseExistingMapping) {
+      console.log("Using existing user mapping (forced).");
+      userMapping = require("./user-mapping");
+    } else {
+      const shouldUpdate = await inquirer.prompt([
+        {
+          type: "confirm",
+          name: "update",
+          message: "Existing user mapping found. Would you like to update it?",
+          default: false,
+        },
+      ]);
+
+      if (shouldUpdate.update) {
+        userMapping = await generateMapping();
+      }
     }
   } catch (error) {
     console.log("No existing user mapping found. Generating new mapping...");
@@ -217,17 +228,30 @@ async function migrateIssues(
 
       let workPackage;
       if (isProd) {
+
+        const mappedUserId = userMapping[issue.fields.creator.accountId];
+        const opUser = commentUserMapping[mappedUserId];
+
         if (existingWorkPackage) {
-          console.log(
-            `Updating existing work package ${existingWorkPackage.id}`
-          );
-          workPackage = await updateWorkPackage(
-            existingWorkPackage.id,
-            payload
-          );
+          console.log(`Updating existing work package ${existingWorkPackage.id}`);
+
+          if (opUser) {
+            console.log(`DEBUG: Creating work package as impersonated user: ${opUser.login}`);
+            workPackage = await updateWorkPackageAsUser(existingWorkPackage.id, payload, opUser);
+          } else {
+            console.log("DEBUG: Creating work package using default API user");
+            workPackage = await updateWorkPackage(existingWorkPackage.id, payload);
+          }
         } else {
           console.log("Creating new work package");
-          workPackage = await createWorkPackage(openProjectId, payload);
+
+          if (opUser) {
+            console.log(`DEBUG: Creating work package as impersonated user: ${opUser.login}`);
+            workPackage = await createWorkPackageAsUser(openProjectId, payload, opUser);
+          } else {
+            console.log("DEBUG: Creating work package using default API user");
+            workPackage = await createWorkPackage(openProjectId, payload);
+          }
         }
       } else {
         console.log(
@@ -265,12 +289,15 @@ async function migrateIssues(
           if (isProd) {
             const tempFilePath = path.join(tempDir, attachment.filename);
             await downloadAttachment(attachment.content, tempFilePath);
-            const newAttachment = await uploadAttachment(
-              workPackage.id,
-              tempFilePath,
-              attachment.filename
-            );
-            attachmentIdMap.set(attachment.filename, newAttachment.id);
+            const mappedUserId = userMapping[issue.fields.creator.accountId];
+            const uploaderUser = commentUserMapping[mappedUserId];
+            if (uploaderUser) {
+              const newAttachment = await uploadAttachmentAsUser(workPackage.id, tempFilePath, attachment.filename, uploaderUser);
+              attachmentIdMap.set(attachment.filename, newAttachment.id);
+            } else {
+              const newAttachment = await uploadAttachment(workPackage.id, tempFilePath, attachment.filename);
+              attachmentIdMap.set(attachment.filename, newAttachment.id);
+            }
             fs.unlinkSync(tempFilePath);
           } else {
             console.log(
@@ -292,13 +319,34 @@ async function migrateIssues(
 
         if (finalDescription !== payload.description.raw) {
           console.log("Updating work package with inline images.");
+
+          console.log("DEBUG Inline image update:", {
+            workPackageId: workPackage.id,
+            creatorUserId: userMapping[issue.fields.creator.accountId],
+            hasImpersonationUser: !!commentUserMapping[userMapping[issue.fields.creator.accountId]]
+          });
+
+          const inlineUpdateUser =
+            commentUserMapping[userMapping[issue.fields.creator.accountId]];
+
           if (isProd) {
-            await updateWorkPackage(workPackage.id, {
-              description: {
-                format: "html",
-                raw: finalDescription,
-              },
-            });
+            if (inlineUpdateUser) {
+              console.log(`DEBUG: Inline update as impersonated user: ${inlineUpdateUser.login}`);
+              await updateWorkPackageAsUser(workPackage.id, {
+                description: {
+                  format: "html",
+                  raw: finalDescription,
+                },
+              }, inlineUpdateUser);
+            } else {
+              console.log("DEBUG: Inline update using default API user (no impersonation available)");
+              await updateWorkPackage(workPackage.id, {
+                description: {
+                  format: "html",
+                  raw: finalDescription,
+                },
+              });
+            }
           } else {
             console.log(
               "[DRY RUN] Would perform second update for description:",
@@ -361,7 +409,8 @@ async function migrateIssues(
 
             const author = jiraComment.author.displayName;
             const date = new Date(jiraComment.created).toLocaleString();
-            const fullCommentHtml = `<p><em>${author} wrote on ${date}:</em></p>${commentHtml}<!-- jira-comment-id: ${jiraComment.id} -->`;
+            //const fullCommentHtml = `<p><em>${author} wrote on ${date}:</em></p>${commentHtml}<!-- jira-comment-id: ${jiraComment.id} -->`;
+            const fullCommentHtml = `${commentHtml}<!-- jira-comment-id: ${jiraComment.id} -->`;
 
             console.log(`Adding new comment for Jira ID ${jiraComment.id}`);
             if (isProd) {
@@ -501,31 +550,6 @@ function convertAtlassianDocumentToHtml(doc) {
   }
 
   return processNode(doc);
-}
-
-async function addCommentAsUser(workPackageId, commentHtml, opUser) {
-
-  console.log("DEBUG addCommentAsUser():", {
-    workPackageId,
-    login: opUser?.login,
-    apiKeyExists: !!opUser?.apiKey
-  });
-
-  const axios = require("axios");
-  const authString = Buffer.from(`apikey:${opUser.apiKey}`).toString("base64");
-  const client = axios.create({
-    baseURL: process.env.OPENPROJECT_HOST,
-    headers: {
-      Authorization: `Basic ${authString}`,
-      "Content-Type": "application/json"
-    }
-  });
-
-  console.log("DEBUG addCommentAsUser(): Using auth user:", opUser.login);
-
-  return client.post(`/api/v3/work_packages/${workPackageId}/activities`, {
-    comment: { format: "html", raw: commentHtml }
-  });
 }
 
 module.exports = {

@@ -195,6 +195,93 @@ async function createWorkPackage(projectId, payload) {
   }
 }
 
+async function createWorkPackageAsUser(projectId, payload, opUser) {
+  const axios = require("axios");
+
+  try {
+    console.log(`DEBUG createWorkPackageAsUser():`, {
+      login: opUser?.login,
+      apiKeyExists: !!opUser?.apiKey
+    });
+
+    const authString = Buffer.from(`apikey:${opUser.apiKey}`).toString("base64");
+
+    const userApi = axios.create({
+      baseURL: process.env.OPENPROJECT_HOST,
+      headers: {
+        Authorization: `Basic ${authString}`,
+        "Content-Type": "application/json"
+      }
+    });
+
+    // Wichtig: wir überschreiben nur den project-Link, sonst nichts!
+    const wpPayload = {
+      ...payload,
+      _links: {
+        ...payload._links,
+        project: { href: `/api/v3/projects/${projectId}` }
+      }
+    };
+
+    const response = await userApi.post(`/api/v3/work_packages`, wpPayload);
+    return response.data;
+
+  } catch (error) {
+    console.error("Error creating work package as user:", error.message);
+    if (error.response?.data) {
+      console.error("Error details:", JSON.stringify(error.response.data, null, 2));
+    }
+    throw error;
+  }
+}
+
+async function updateWorkPackageAsUser(workPackageId, payload, opUser) {
+  const axios = require("axios");
+
+  try {
+    console.log(`DEBUG updateWorkPackageAsUser():`, {
+      workPackageId,
+      login: opUser?.login,
+      apiKeyExists: !!opUser?.apiKey
+    });
+
+    const authString = Buffer.from(`apikey:${opUser.apiKey}`).toString("base64");
+
+    const userApi = axios.create({
+      baseURL: process.env.OPENPROJECT_HOST,
+      headers: {
+        Authorization: `Basic ${authString}`,
+        "Content-Type": "application/json"
+      }
+    });
+
+    // Fetch current lockVersion
+    const current = await userApi.get(`/api/v3/work_packages/${workPackageId}`);
+    const lockVersion = current.data.lockVersion;
+
+    const { _type, ...cleanPayload } = payload;
+
+    const updatePayload = {
+      ...cleanPayload,
+      lockVersion
+    };
+
+    const response = await userApi.patch(
+      `/api/v3/work_packages/${workPackageId}`,
+      updatePayload
+    );
+
+    return response.data;
+
+  } catch (error) {
+    console.error("Error updating work package as user:", error.message);
+    if (error.response?.data) {
+      console.error("Error details:", JSON.stringify(error.response.data, null, 2));
+    }
+    throw error;
+  }
+}
+
 async function updateWorkPackage(workPackageId, payload) {
   try {
     // Get current work package to get its lock version
@@ -246,7 +333,32 @@ async function addComment(workPackageId, comment) {
   }
 }
 
-async function uploadAttachment(workPackageId, filePath, fileName, mimeType) {
+async function addCommentAsUser(workPackageId, commentHtml, opUser) {
+
+  console.log("DEBUG addCommentAsUser():", {
+    workPackageId,
+    login: opUser?.login,
+    apiKeyExists: !!opUser?.apiKey
+  });
+
+  const axios = require("axios");
+  const authString = Buffer.from(`apikey:${opUser.apiKey}`).toString("base64");
+  const client = axios.create({
+    baseURL: process.env.OPENPROJECT_HOST,
+    headers: {
+      Authorization: `Basic ${authString}`,
+      "Content-Type": "application/json"
+    }
+  });
+
+  console.log("DEBUG addCommentAsUser(): Using auth user:", opUser.login);
+
+  return client.post(`/api/v3/work_packages/${workPackageId}/activities`, {
+    comment: { format: "html", raw: commentHtml }
+  });
+}
+
+async function uploadAttachment(workPackageId, filePath, fileName) {
   try {
     const formData = new FormData();
     formData.append("metadata", JSON.stringify({ fileName }));
@@ -268,6 +380,59 @@ async function uploadAttachment(workPackageId, filePath, fileName, mimeType) {
       `Error uploading attachment to work package ${workPackageId}:`,
       error.message
     );
+    throw error;
+  }
+}
+
+// Upload attachment using the API key of a specific user
+async function uploadAttachmentAsUser(workPackageId, filePath, fileName, opUser) {
+  const axios = require("axios");
+  const FormData = require("form-data");
+  const fs = require("fs");
+
+  try {
+    console.log(`DEBUG uploadAttachmentAsUser():`, {
+      workPackageId,
+      login: opUser?.login,
+      apiKeyExists: !!opUser?.apiKey
+    });
+
+    const authString = Buffer.from(`apikey:${opUser.apiKey}`).toString("base64");
+
+    const userApi = axios.create({
+      baseURL: process.env.OPENPROJECT_HOST,
+      headers: {
+        Authorization: `Basic ${authString}`
+      }
+    });
+
+    const formData = new FormData();
+    formData.append("metadata", JSON.stringify({ fileName }));
+    formData.append("file", fs.createReadStream(filePath));
+
+    const response = await userApi.post(
+      `/api/v3/work_packages/${workPackageId}/attachments`,
+      formData,
+      {
+        headers: {
+          ...formData.getHeaders()
+        }
+      }
+    );
+
+    return response.data;
+
+  } catch (error) {
+    console.error(
+      `Error uploading attachment as user to work package ${workPackageId}:`,
+      error.message
+    );
+    if (error.response?.data) {
+      console.error(
+        "Error details:",
+        JSON.stringify(error.response.data, null, 2)
+      );
+    }
     throw error;
   }
 }
@@ -519,9 +684,13 @@ module.exports = {
   getOpenProjectWorkPackages,
   setParentWorkPackage,
   createWorkPackage,
+  createWorkPackageAsUser,
+  updateWorkPackageAsUser,
   updateWorkPackage,
   addComment,
+  addCommentAsUser,
   uploadAttachment,
+  uploadAttachmentAsUser,
   addWatcher,
   listProjects,
   getWorkPackageTypes,
